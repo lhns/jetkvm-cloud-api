@@ -1,0 +1,38 @@
+name: Test
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql://jetkvm:jetkvm@localhost:5432/jetkvm?schema=public
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: jetkvm
+          POSTGRES_PASSWORD: jetkvm
+          POSTGRES_DB: jetkvm
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U jetkvm -d jetkvm"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npm run build
+      - run: npx prisma migrate deploy
+      # The migrations must produce exactly the schema: a hand-written one that drifts fails here.
+      - run: npx prisma migrate diff --from-schema-datasource prisma/schema.prisma --to-schema-datamodel prisma/schema.prisma --exit-code
+      - run: npm test
