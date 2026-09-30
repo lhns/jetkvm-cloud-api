@@ -8,7 +8,7 @@ import {
   UnprocessableEntityError,
 } from "./errors";
 import * as crypto from "crypto";
-import { authenticated } from "./auth";
+import { verifySessionToken } from "./auth";
 import { activeConnections } from "./webrtc-signaling";
 import { effectiveSku } from "./skus";
 
@@ -126,11 +126,7 @@ export const Delete = async (
 
   // If the user doesn't have a secret token, we check their session cookie
   try {
-    await new Promise<void>(resolve => {
-      authenticated(req, res, () => {
-        resolve();
-      });
-    });
+    await verifySessionToken(req.session?.id_token);
   } catch (error) {
     throw new BadRequestError("Unauthorized");
   }

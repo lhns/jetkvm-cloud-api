@@ -38,8 +38,8 @@ export const verifyToken = async (idToken: string) => {
   }
 };
 
-export const authenticated = async (req: Request, res: Response, next: NextFunction) => {
-  const idToken = req.session?.id_token;
+/** The session's id_token, verified, unexpired and allowlisted; throws UnauthorizedError otherwise. */
+export const verifySessionToken = async (idToken?: string | null) => {
   if (!idToken) throw new UnauthorizedError();
 
   const payload = await verifyToken(idToken);
@@ -55,6 +55,11 @@ export const authenticated = async (req: Request, res: Response, next: NextFunct
     throw new UnauthorizedError("Account is not in the allowlist", "account_not_allowed");
   }
 
+  return payload;
+};
+
+export const authenticated = async (req: Request, res: Response, next: NextFunction) => {
+  await verifySessionToken(req.session?.id_token);
   next();
 };
 
