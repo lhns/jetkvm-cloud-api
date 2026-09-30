@@ -20,17 +20,38 @@ model User {
   picture  String?
   device   Device[]
   Activity TurnActivity[]
+  shares   DeviceShare[]
+
+  // Sealed with COOKIE_SECRET (src/sharing.ts). Set only after the owner grants offline access;
+  // used to mint the owner's id_token for a shared user's session.
+  googleRefreshToken String?
 }
 
 model Device {
-  id                 String    @unique
-  lastSeen           DateTime? @db.Timestamp(6)
+  id                 String        @unique
+  lastSeen           DateTime?     @db.Timestamp(6)
   name               String?
-  user               User      @relation(fields: [userId], references: [id])
+  user               User          @relation(fields: [userId], references: [id])
   userId             BigInt
   tempToken          String?
   tempTokenExpiresAt DateTime?
-  secretToken        String?   @unique
+  secretToken        String?       @unique
+  shares             DeviceShare[]
+}
+
+// Full access to a device the owner shares. email is the invite; userId is bound once a Google
+// account with that verified email logs in, and access follows userId from then on.
+model DeviceShare {
+  id        BigInt   @id @default(autoincrement())
+  device    Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  deviceId  String
+  email     String
+  user      User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    BigInt?
+  createdAt DateTime @default(now())
+
+  @@unique([deviceId, email])
+  @@index([userId])
 }
 
 model TurnActivity {

@@ -1,7 +1,6 @@
 // src/webrtc.ts
 
-import { MessageEvent, WebSocket, WebSocketServer } from "ws";
-import * as jose from "jose";
+import { MessageEvent, RawData, WebSocket, WebSocketServer } from "ws";
 import { prisma } from "./db";
 import { IncomingMessage } from "http";
 import { Socket } from "node:net";
@@ -9,6 +8,8 @@ import { Device } from "@prisma/client";
 import { Server, ServerResponse } from "node:http";
 import { cookieSessionMiddleware } from ".";
 import { effectiveSku, normalizeSku } from "./skus";
+import { verifySessionToken } from "./auth";
+import { deviceSessionToken, findAccessibleDevice } from "./sharing";
 
 export interface DeviceConnection {
   ws: WebSocket;
@@ -228,7 +229,7 @@ async function handleClientSocketRequest(
       try {
         // Authenticate client and get device ID
         const { deviceId, token } = await authenticateClientRequest(req as any);
-        if (!deviceId) {
+        if (!deviceId || !token) {
           return socket.destroy();
         }
 
@@ -255,7 +256,7 @@ async function handleClientSocketRequest(
 }
 
 // Authenticate the client connection
-async function authenticateClientRequest(req: Request & { session: any }) {
+export async function authenticateClientRequest(req: Request & { session: any }) {
   const session = req.session;
   const token = session?.id_token;
 
@@ -265,7 +266,9 @@ async function authenticateClientRequest(req: Request & { session: any }) {
   }
 
   try {
-    const { sub } = jose.decodeJwt(token);
+    // Verified here, not only decoded: for a shared device the device never sees this token.
+    const { sub } = await verifySessionToken(token);
+    if (!sub) return { deviceId: null };
     const url = new URL(req.url || "", "http://localhost");
     const deviceId = url.searchParams.get("id");
 
@@ -275,17 +278,17 @@ async function authenticateClientRequest(req: Request & { session: any }) {
     }
 
     // Check if device exists and user has access
-    const device = await prisma.device.findUnique({
-      where: { id: deviceId, user: { googleId: sub } },
-      select: { id: true },
-    });
+    const device = await findAccessibleDevice(deviceId, sub);
 
     if (!device) {
       console.log("[Client] Device not found or user doesn't have access.");
       return { deviceId: null };
     }
 
-    return { deviceId, token };
+    // Fails the upgrade now if a shared device's owner token cannot be minted. Resolved again per
+    // offer: a minted token is cached and refreshed before it expires.
+    await deviceSessionToken(device, token);
+    return { deviceId, token: () => deviceSessionToken(device, token) };
   } catch (error) {
     console.error("[Client] Authentication error:", error);
     return { deviceId: null };
@@ -293,7 +296,11 @@ async function authenticateClientRequest(req: Request & { session: any }) {
 }
 
 // Setup the client WebSocket after authentication
-function setupClientWebSocket(clientWs: WebSocket, deviceId: string, token: string) {
+export function setupClientWebSocket(
+  clientWs: WebSocket,
+  deviceId: string,
+  token: () => Promise<string>,
+) {
   console.log(`[Client] New connection for device ${deviceId}`);
 
   // Get device WebSocket
@@ -326,7 +333,14 @@ function setupClientWebSocket(clientWs: WebSocket, deviceId: string, token: stri
   );
 
   // Handle message forwarding from client to device
+  // Handled in arrival order: resolving an offer's token can await I/O, and the ICE candidates
+  // that follow must not overtake it to the device.
+  let handled = Promise.resolve();
   clientWs.on("message", data => {
+    handled = handled.then(() => handleClientMessage(data));
+  });
+
+  const handleClientMessage = async (data: RawData) => {
     // Handle ping/pong
     if (data.toString() === "ping") return clientWs.send("pong");
 
@@ -343,7 +357,7 @@ function setupClientWebSocket(clientWs: WebSocket, deviceId: string, token: stri
                 sd: msg.data.sd,
                 ip,
                 iceServers,
-                OidcGoogle: token,
+                OidcGoogle: await token(),
               },
             }),
           );
@@ -362,7 +376,7 @@ function setupClientWebSocket(clientWs: WebSocket, deviceId: string, token: stri
     } catch (error) {
       console.error(`[Client] Error processing message for ${deviceId}:`, error);
     }
-  });
+  };
 
   // Handle message forwarding from device to client
   const deviceMessageHandler = (event: MessageEvent) => {

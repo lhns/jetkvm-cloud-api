@@ -9,6 +9,7 @@ import * as Devices from "./devices";
 import * as OIDC from "./oidc";
 import * as Webrtc from "./webrtc";
 import * as Releases from "./releases";
+import * as Sharing from "./sharing";
 
 import { HttpError } from "./errors";
 import { authenticated, bearerToken } from "./auth";
@@ -140,6 +141,9 @@ app.get("/devices/:id", authenticated, Devices.Retrieve);
 app.post("/devices/token", Devices.Token);
 app.put("/devices/:id", authenticated, Devices.Update);
 app.delete("/devices/:id", Devices.Delete);
+app.get("/devices/:id/shares", authenticated, Sharing.List);
+app.post("/devices/:id/shares", authenticated, Sharing.Create);
+app.delete("/devices/:id/shares/:shareId", authenticated, Sharing.Delete);
 
 app.post("/webrtc/session", authenticated, Webrtc.CreateSession);
 app.post("/webrtc/ice_config", authenticated, Webrtc.CreateIceCredentials);
