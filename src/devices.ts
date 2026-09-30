@@ -8,9 +8,10 @@ import {
   UnprocessableEntityError,
 } from "./errors";
 import * as crypto from "crypto";
-import { authenticated } from "./auth";
+import { verifySessionToken } from "./auth";
 import { activeConnections } from "./webrtc-signaling";
 import { effectiveSku } from "./skus";
+import { accessibleBy, findAccessibleDevice } from "./sharing";
 
 /**
  * Version and SKU are known only while the device holds a signaling
@@ -27,6 +28,11 @@ function liveDeviceState(id: string) {
   };
 }
 
+/** A shared user learns who owns the device, but not the owner's Google id. */
+function sharedFields(shared: boolean, ownerEmail: string | null) {
+  return shared ? { shared, ownerEmail } : { shared };
+}
+
 export const List = async (req: express.Request, res: express.Response) => {
   const idToken = req.session?.id_token;
   const { iss, sub } = jose.decodeJwt(idToken);
@@ -34,14 +40,21 @@ export const List = async (req: express.Request, res: express.Response) => {
   // Authorization server’s identifier for the user
   const isGoogle = iss === "https://accounts.google.com";
   if (isGoogle) {
+    if (!sub) throw new UnauthorizedError("Missing sub in token");
     const devices = await prisma.device.findMany({
-      where: { user: { googleId: sub } },
-      select: { id: true, name: true, lastSeen: true },
+      where: accessibleBy(sub),
+      select: {
+        id: true,
+        name: true,
+        lastSeen: true,
+        user: { select: { googleId: true, email: true } },
+      },
     });
 
     return res.json({
-      devices: devices.map(device => ({
+      devices: devices.map(({ user, ...device }) => ({
         ...device,
+        ...sharedFields(user.googleId !== sub, user.email),
         ...liveDeviceState(device.id),
       })),
     });
@@ -56,16 +69,22 @@ export const Retrieve = async (
 ) => {
   const idToken = req.session?.id_token;
   const { sub } = jose.decodeJwt(idToken);
+  if (!sub) throw new UnauthorizedError("Missing sub in token");
   const { id } = req.params;
   if (!id) throw new UnprocessableEntityError("Missing device id in params");
 
-  const device = await prisma.device.findUnique({
-    where: { id, user: { googleId: sub } },
-    select: { id: true, name: true, user: { select: { googleId: true } } },
-  });
-
+  const device = await findAccessibleDevice(id, sub);
   if (!device) throw new NotFoundError("Device not found");
-  return res.status(200).json({ device: { ...device, ...liveDeviceState(device.id) } });
+
+  const { user, shared, lastSeen, ...rest } = device;
+  return res.status(200).json({
+    device: {
+      ...rest,
+      ...(shared ? {} : { user: { googleId: user.googleId } }),
+      ...sharedFields(shared, user.email),
+      ...liveDeviceState(device.id),
+    },
+  });
 };
 
 export const Update = async (
@@ -81,6 +100,10 @@ export const Update = async (
 
   const { name } = req.body as { name: string };
   if (!name) throw new UnprocessableEntityError("Missing name in body");
+
+  // Owner only. A shared user gets the same 404 as a stranger.
+  const owned = await prisma.device.findFirst({ where: { id, user: { googleId: sub } } });
+  if (!owned) throw new NotFoundError("Device not found");
 
   const device = await prisma.device.update({
     where: { id, user: { googleId: sub } },
@@ -126,11 +149,7 @@ export const Delete = async (
 
   // If the user doesn't have a secret token, we check their session cookie
   try {
-    await new Promise<void>(resolve => {
-      authenticated(req, res, () => {
-        resolve();
-      });
-    });
+    await verifySessionToken(req.session?.id_token);
   } catch (error) {
     throw new BadRequestError("Unauthorized");
   }
@@ -141,6 +160,10 @@ export const Delete = async (
 
   const { id } = req.params;
   if (!id) throw new UnprocessableEntityError("Missing device id in params");
+
+  // Owner only. A shared user gets the same 404 as a stranger.
+  const owned = await prisma.device.findFirst({ where: { id, user: { googleId: sub } } });
+  if (!owned) throw new NotFoundError("Device not found");
 
   await prisma.device.delete({ where: { id, user: { googleId: sub } } });
 

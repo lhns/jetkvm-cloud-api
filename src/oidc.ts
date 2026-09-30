@@ -4,12 +4,13 @@ import { prisma } from "./db";
 import { BadRequestError, UnauthorizedError } from "./errors";
 import { isIdentityAllowed } from "./auth";
 import * as crypto from "crypto";
+import { bindPendingShares, sealRefreshToken } from "./sharing";
 
 const API_HOSTNAME = process.env.API_HOSTNAME;
 const APP_HOSTNAME = process.env.APP_HOSTNAME;
 const REDIRECT_URI = `${API_HOSTNAME}/oidc/callback`;
 
-const getGoogleOIDCClient = async () => {
+export const getGoogleOIDCClient = async () => {
   const googleIssuer = await Issuer.discover("https://accounts.google.com");
   return new googleIssuer.Client({
     client_id: process.env.GOOGLE_CLIENT_ID,
@@ -34,9 +35,14 @@ export const Google = async (req: express.Request, res: express.Response) => {
   const code_challenge = generators.codeChallenge(code_verifier);
   req.session!.code_verifier = code_verifier;
 
+  // consent=1 is the owner enabling device sharing: offline access yields the refresh token
+  // that lets a shared user's session carry the owner's identity (src/sharing.ts).
+  const offline = req.body?.consent === "1";
+
   const client = await getGoogleOIDCClient();
   const authorizationUrl = client.authorizationUrl({
     scope: "openid email profile",
+    ...(offline ? { access_type: "offline", prompt: "consent" } : {}),
     state: state.toString(),
     // This ensures that to even issue the token, the client must have the code_verifier,
     // which is stored in the session cookie.
@@ -100,19 +106,28 @@ export const Callback = async (req: express.Request, res: express.Response) => {
 
   req.session!.id_token = tokenSet.id_token;
 
-  await prisma.user.upsert({
+  // Google returns a refresh token only for an offline-access login; a plain one keeps the stored one.
+  const refresh = tokenSet.refresh_token
+    ? { googleRefreshToken: sealRefreshToken(tokenSet.refresh_token) }
+    : {};
+  const user = await prisma.user.upsert({
     where: { googleId: tokenClaims.sub },
     update: {
       googleId: tokenClaims.sub,
       email: userInfo.email,
       picture: userInfo.picture,
+      ...refresh,
     },
     create: {
       googleId: tokenClaims.sub,
       email: userInfo.email,
       picture: userInfo.picture,
+      ...refresh,
     },
   });
+  if (userInfo.email_verified !== false) {
+    await bindPendingShares(user.id, userInfo.email);
+  }
 
   // This means the user is trying to adopt a device by first logging/signin up/in
   if (deviceId) {

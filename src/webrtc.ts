@@ -5,6 +5,7 @@ import * as crypto from "crypto";
 import { prisma } from "./db";
 import { BadRequestError, InternalServerError, NotFoundError, UnauthorizedError, UnprocessableEntityError } from "./errors";
 import { activeConnections, iceServers, inFlight } from "./webrtc-signaling";
+import { deviceSessionToken, findAccessibleDevice } from "./sharing";
 
 const CLOUDFLARE_TURN_ID = process.env.CLOUDFLARE_TURN_ID;
 const CLOUDFLARE_TURN_TOKEN = process.env.CLOUDFLARE_TURN_TOKEN;
@@ -17,20 +18,21 @@ const TURN_TTL = Number.parseInt(process.env.TURN_TTL ?? "", 10) || 3600;
 export const CreateSession = async (req: express.Request, res: express.Response) => {
   const idToken = req.session?.id_token;
   const { sub } = jose.decodeJwt(idToken);
+  if (!sub) throw new UnauthorizedError();
 
   const { id, sd } = req.body;
 
   if (!id) throw new UnprocessableEntityError("Missing id");
   if (!sd) throw new UnprocessableEntityError("Missing sd");
 
-  const device = await prisma.device.findUnique({
-    where: { id, user: { googleId: sub } },
-    select: { id: true },
-  });
+  const device = await findAccessibleDevice(id, sub);
 
   if (!device) {
     throw new NotFoundError("Device not found");
   }
+
+  // The device accepts only the owner's identity; see src/sharing.ts.
+  const oidcGoogle = await deviceSessionToken(device, idToken);
 
   if (inFlight.has(id)) {
     console.log(`Websocket for ${id} in-flight with another client`);
@@ -74,7 +76,7 @@ export const CreateSession = async (req: express.Request, res: express.Response)
           sd,
           ip,
           iceServers,
-          OidcGoogle: idToken,
+          OidcGoogle: oidcGoogle,
         }),
       );
     });
